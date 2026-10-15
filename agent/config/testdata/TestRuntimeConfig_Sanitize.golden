@@ -165,6 +165,9 @@
     "DNSRecursorStrategy": "",
     "DNSRecursorTimeout": "0s",
     "DNSRecursors": [],
+    "DNSResponseCacheEnabled": false,
+    "DNSResponseCacheMaxStale": "0s",
+    "DNSResponseCacheTTL": "0s",
     "DNSSOA": {
         "Expire": 86400,
         "Minttl": 0,

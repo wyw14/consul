@@ -97,6 +97,14 @@ type dnsServerConfig struct {
 	TTLStrict          map[string]time.Duration
 	DisableCompression bool
 
+	// ResponseCache* configure the DNS service response cache. The cache
+	// serves service lookups keyed on their query dimensions from memory and
+	// revalidates expired entries in the background (stale-while-revalidate).
+	ResponseCacheEnabled     bool
+	ResponseCacheTTL         time.Duration
+	ResponseCacheNegativeTTL time.Duration
+	ResponseCacheMaxStale    time.Duration
+
 	enterpriseDNSConfig
 }
 
@@ -140,7 +148,23 @@ type DNSServer struct {
 	// the recursor handler is only enabled if recursors are configured. This flag is used during config hot-reloading
 	recursorEnabled uint32
 
+	// responseCache caches service lookup responses with TTL based freshness
+	// and background refresh. It is always present and is a no-op unless
+	// ResponseCacheEnabled is set in the active server config.
+	responseCache *dnsServiceResponseCache
+
 	defaultEnterpriseMeta acl.EnterpriseMeta
+}
+
+// responseCacheConfigFromServer builds the hot-reloadable cache configuration
+// from the active DNS server configuration.
+func responseCacheConfigFromServer(cfg *dnsServerConfig) dnsResponseCacheConfig {
+	return dnsResponseCacheConfig{
+		Enabled:     cfg.ResponseCacheEnabled,
+		TTL:         cfg.ResponseCacheTTL,
+		NegativeTTL: cfg.ResponseCacheNegativeTTL,
+		MaxStale:    cfg.ResponseCacheMaxStale,
+	}
 }
 
 func NewDNSServer(a *Agent) (*DNSServer, error) {
@@ -160,6 +184,7 @@ func NewDNSServer(a *Agent) (*DNSServer, error) {
 		return nil, err
 	}
 	srv.config.Store(cfg)
+	srv.responseCache = newDNSServiceResponseCache(responseCacheConfigFromServer(cfg), nil, srv.logger)
 
 	srv.mux.HandleFunc("arpa.", srv.handlePtr)
 	srv.mux.HandleFunc(srv.domain, srv.handleQuery)
@@ -202,7 +227,13 @@ func getDNSServerConfig(conf *config.RuntimeConfig) (*dnsServerConfig, error) {
 			Refresh: conf.DNSSOA.Refresh,
 			Retry:   conf.DNSSOA.Retry,
 		},
-		enterpriseDNSConfig: getEnterpriseDNSConfig(conf),
+		ResponseCacheEnabled:  conf.DNSResponseCacheEnabled,
+		ResponseCacheTTL:      conf.DNSResponseCacheTTL,
+		ResponseCacheMaxStale: conf.DNSResponseCacheMaxStale,
+		// Per RFC 2308 the negative TTL is bounded by the SOA minimum field;
+		// a zero value falls back to the cache's built-in default.
+		ResponseCacheNegativeTTL: time.Duration(conf.DNSSOA.Minttl) * time.Second,
+		enterpriseDNSConfig:      getEnterpriseDNSConfig(conf),
 	}
 	if conf.DNSServiceTTL != nil {
 		cfg.TTLRadix = radix.New()
@@ -307,6 +338,9 @@ func (d *DNSServer) ReloadConfig(newCfg *config.RuntimeConfig) error {
 	}
 	d.config.Store(cfg)
 	d.toggleRecursorHandlerFromConfig(cfg)
+	if d.responseCache != nil {
+		d.responseCache.configure(responseCacheConfigFromServer(cfg))
+	}
 	return nil
 }
 
@@ -1563,9 +1597,45 @@ func (d *DNSServer) lookupServiceNodes(cfg *dnsRequestConfig, lookup serviceLook
 	return out, nil
 }
 
+// lookupServiceNodesCached returns the service nodes for a lookup, serving
+// them from the DNS response cache when it is enabled. The stable cache key
+// covers the datacenter, tag and passing filter (plus the other query
+// dimensions and ACL identity), so distinct queries can never share answers.
+func (d *DNSServer) lookupServiceNodesCached(cfg *dnsRequestConfig, lookup serviceLookup) (structs.IndexedCheckServiceNodes, error) {
+	if !cfg.ResponseCacheEnabled || d.responseCache == nil {
+		return d.lookupServiceNodes(cfg, lookup)
+	}
+
+	key := dnsServiceCacheKey{
+		datacenter:    lookup.Datacenter,
+		tag:           lookup.Tag,
+		onlyPassing:   cfg.OnlyPassing,
+		service:       lookup.Service,
+		peerName:      lookup.PeerName,
+		samenessGroup: lookup.SamenessGroup,
+		connect:       lookup.Connect,
+		ingress:       lookup.Ingress,
+		apiGateway:    lookup.APIGateway,
+		token:         d.coalesceDNSToken(cfg.token),
+		tenant:        enterpriseMetaCacheKey(lookup.EnterpriseMeta),
+	}
+
+	nodes, _, err := d.responseCache.get(context.Background(), key, func(ctx context.Context) (structs.CheckServiceNodes, error) {
+		out, err := d.lookupServiceNodes(cfg, lookup)
+		if err != nil {
+			return nil, err
+		}
+		return out.Nodes, nil
+	})
+	if err != nil {
+		return structs.IndexedCheckServiceNodes{}, err
+	}
+	return structs.IndexedCheckServiceNodes{Nodes: nodes}, nil
+}
+
 // handleServiceQuery is used to handle a service query
 func (d *DNSServer) handleServiceQuery(cfg *dnsRequestConfig, lookup serviceLookup, req, resp *dns.Msg) error {
-	out, err := d.lookupServiceNodes(cfg, lookup)
+	out, err := d.lookupServiceNodesCached(cfg, lookup)
 	if err != nil {
 		return fmt.Errorf("rpc request failed: %w", err)
 	}
@@ -2177,6 +2247,30 @@ func (d *DNSServer) addServiceSRVRecordsToMessage(cfg *dnsRequestConfig, lookup 
 	return nil
 }
 
+// dnsRecursorExchange sends req to a single recursor over the given client
+// network ("udp" or "tcp"). When a UDP response has the truncation (TC) bit
+// set, the query is retried over TCP so the complete record set is returned
+// instead of forwarding a truncated answer. If the recursor cannot be reached
+// over TCP (or the TCP retry fails for another reason), the truncated UDP
+// response is returned with its TC bit intact so the downstream client can
+// still perform the standard TCP retry itself.
+func dnsRecursorExchange(network string, timeout time.Duration, recursor string, req *dns.Msg) (*dns.Msg, time.Duration, error) {
+	c := &dns.Client{Net: network, Timeout: timeout}
+	r, rtt, err := c.Exchange(req, recursor)
+	if err != nil || r == nil || !r.Truncated || network == "tcp" {
+		return r, rtt, err
+	}
+
+	tcpClient := &dns.Client{Net: "tcp", Timeout: timeout}
+	rTCP, rttTCP, errTCP := tcpClient.Exchange(req, recursor)
+	if errTCP != nil || rTCP == nil {
+		// Preserve the truncated UDP response and the original (nil) error so
+		// the caller forwards it to the client unchanged.
+		return r, rtt, nil
+	}
+	return rTCP, rtt + rttTCP, nil
+}
+
 // handleRecurse is used to handle recursive DNS queries
 func (d *DNSServer) handleRecurse(resp dns.ResponseWriter, req *dns.Msg) {
 	cfg := d.getRequestConfig(resp)
@@ -2199,13 +2293,12 @@ func (d *DNSServer) handleRecurse(resp dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	// Recursively resolve
-	c := &dns.Client{Net: network, Timeout: cfg.RecursorTimeout}
 	var r *dns.Msg
 	var rtt time.Duration
 	var err error
 	for _, idx := range cfg.RecursorStrategy.Indexes(len(cfg.Recursors)) {
 		recursor := cfg.Recursors[idx]
-		r, rtt, err = c.Exchange(req, recursor)
+		r, rtt, err = dnsRecursorExchange(network, cfg.RecursorTimeout, recursor, req)
 		// Check if the response is valid and has the desired Response code
 		if r != nil && (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
 			d.logger.Debug("recurse failed for question",
@@ -2284,14 +2377,14 @@ func (d *DNSServer) resolveCNAME(cfg *dnsRequestConfig, name string, maxRecursio
 	m := new(dns.Msg)
 	m.SetQuestion(name, dns.TypeA)
 
-	// Make a DNS lookup request
-	c := &dns.Client{Net: "udp", Timeout: cfg.RecursorTimeout}
 	var r *dns.Msg
 	var rtt time.Duration
 	var err error
 	for _, idx := range cfg.RecursorStrategy.Indexes(len(cfg.Recursors)) {
 		recursor := cfg.Recursors[idx]
-		r, rtt, err = c.Exchange(m, recursor)
+		// External CNAME targets are resolved over UDP first and retried
+		// over TCP when the response is truncated, see dnsRecursorExchange.
+		r, rtt, err = dnsRecursorExchange("udp", cfg.RecursorTimeout, recursor, m)
 		if err == nil {
 			d.logger.Debug("cname recurse RTT for name",
 				"name", name,

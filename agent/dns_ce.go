@@ -103,3 +103,10 @@ func nodeCanonicalDNSName(node *structs.Node, respDomain string) string {
 func (d *DNSServer) setEnterpriseMetaFromRequestContext(requestContext agentdns.Context, requestDnsConfig *dnsRequestConfig) {
 	// do nothing
 }
+
+// enterpriseMetaCacheKey returns the tenancy portion of a DNS response cache
+// key. There is no partition or namespace in OSS builds so it is always
+// empty; enterprise builds include both to avoid cross-tenant cache sharing.
+func enterpriseMetaCacheKey(_ acl.EnterpriseMeta) string {
+	return ""
+}

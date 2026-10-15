@@ -300,6 +300,30 @@ type RuntimeConfig struct {
 	// hcl: dns_config { cache_max_age = "duration" }
 	DNSCacheMaxAge time.Duration
 
+	// DNSResponseCacheEnabled controls the DNS response cache. When enabled,
+	// service DNS lookups are served from an in-memory cache keyed on the
+	// query dimensions (datacenter, tag, only_passing, ...). Expired entries
+	// continue to be served while a single background refresh is in flight.
+	//
+	// hcl: dns_config { enable_response_cache = (true|false) }
+	DNSResponseCacheEnabled bool
+
+	// DNSResponseCacheTTL is the time a cached DNS response is considered
+	// fresh. After it elapses the response is served stale and refreshed in
+	// the background. Defaults to 30s when the response cache is enabled.
+	//
+	// hcl: dns_config { response_cache_ttl = "duration" }
+	DNSResponseCacheTTL time.Duration
+
+	// DNSResponseCacheMaxStale bounds how long an expired response may be
+	// served while a refresh is in flight. When the bound is reached the
+	// request blocks until a fresh response is available. A zero value
+	// (the default) allows stale responses to be served until the refresh
+	// completes.
+	//
+	// hcl: dns_config { response_cache_max_stale = "duration" }
+	DNSResponseCacheMaxStale time.Duration
+
 	// HTTPUseCache whether or not to use cache for http queries. Defaults
 	// to true.
 	//

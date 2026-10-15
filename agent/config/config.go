@@ -746,6 +746,20 @@ type DNS struct {
 	UseCache           *bool             `mapstructure:"use_cache"`
 	CacheMaxAge        *string           `mapstructure:"cache_max_age"`
 
+	// EnableResponseCache enables the DNS response cache which serves service
+	// lookups from an in-memory cache keyed on the query dimensions and
+	// revalidates expired entries in the background.
+	EnableResponseCache *bool `mapstructure:"enable_response_cache"`
+
+	// ResponseCacheTTL is the time a cached DNS service response is served
+	// without triggering a background refresh.
+	ResponseCacheTTL *string `mapstructure:"response_cache_ttl"`
+
+	// ResponseCacheMaxStale bounds how long an expired response may continue
+	// to be served while a background refresh is in flight. A zero value
+	// means stale entries are served until the refresh completes.
+	ResponseCacheMaxStale *string `mapstructure:"response_cache_max_stale"`
+
 	// Enterprise Only
 	PreferNamespace *bool `mapstructure:"prefer_namespace"`
 }

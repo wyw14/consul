@@ -273,6 +273,9 @@ dns_config {
     udp_answer_limit = 29909
     use_cache = true
     cache_max_age = "5m"
+    enable_response_cache = true
+    response_cache_ttl = "32045s"
+    response_cache_max_stale = "32046s"
     prefer_namespace = true
 }
 enable_acl_replication = true

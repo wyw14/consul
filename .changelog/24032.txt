@@ -1,0 +1,3 @@
+```release-note:feature
+dns: Added a configurable response cache for service DNS queries (`dns_config.enable_response_cache`) keyed on datacenter, tag and the only_passing filter. Cached responses are refreshed in the background after `dns_config.response_cache_ttl` (stale-while-revalidate, bounded by `response_cache_max_stale`), deregistered services drop stale addresses immediately, empty answers carry SOA NXDOMAIN/NODATA semantics, and recursive queries now transparently fall back to TCP when an upstream UDP response is truncated.
+```

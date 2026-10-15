@@ -985,6 +985,9 @@ func (b *builder) build() (rt RuntimeConfig, err error) {
 		DNSNodeMetaTXT:        boolValWithDefault(c.DNS.NodeMetaTXT, true),
 		DNSUseCache:           boolVal(c.DNS.UseCache),
 		DNSCacheMaxAge:        b.durationVal("dns_config.cache_max_age", c.DNS.CacheMaxAge),
+		DNSResponseCacheEnabled: boolVal(c.DNS.EnableResponseCache),
+		DNSResponseCacheTTL:     b.durationVal("dns_config.response_cache_ttl", c.DNS.ResponseCacheTTL),
+		DNSResponseCacheMaxStale: b.durationVal("dns_config.response_cache_max_stale", c.DNS.ResponseCacheMaxStale),
 
 		// HTTP
 		HTTPPort:              httpPort,
