@@ -1431,6 +1431,38 @@ func TestServer_RPC(t *testing.T) {
 	}
 }
 
+// TestInmemCodec_WriteResponse proves that callers which discard a reply
+// (for example the historical Catalog.Register callers passing *struct{}) are
+// not broken when a method starts returning a concrete reply type.
+func TestInmemCodec_WriteResponse(t *testing.T) {
+	t.Parallel()
+
+	t.Run("typed reply is copied into matching target", func(t *testing.T) {
+		reply := &structs.RegisterReply{IdempotencyKey: "k", ServiceVersion: 3}
+		var got structs.RegisterReply
+		codec := &inmemCodec{reply: &got}
+		require.NoError(t, codec.WriteResponse(&rpc.Response{}, reply))
+		require.Equal(t, "k", got.IdempotencyKey)
+		require.Equal(t, uint64(3), got.ServiceVersion)
+	})
+
+	t.Run("discard target stays empty and does not panic", func(t *testing.T) {
+		reply := &structs.RegisterReply{IdempotencyKey: "k", ServiceVersion: 3}
+		var discarded struct{}
+		codec := &inmemCodec{reply: &discarded}
+		require.NotPanics(t, func() {
+			require.NoError(t, codec.WriteResponse(&rpc.Response{}, reply))
+		})
+	})
+
+	t.Run("error response is surfaced regardless of target type", func(t *testing.T) {
+		var discarded struct{}
+		codec := &inmemCodec{reply: &discarded}
+		require.NoError(t, codec.WriteResponse(&rpc.Response{Error: "boom"}, &structs.RegisterReply{}))
+		require.EqualError(t, codec.err, "boom")
+	})
+}
+
 // TestServer_RPC_MetricsIntercept_Off proves that we can turn off net/rpc interceptors all together.
 func TestServer_RPC_MetricsIntercept_Off(t *testing.T) {
 	if testing.Short() {

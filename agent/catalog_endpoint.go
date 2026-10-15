@@ -151,14 +151,22 @@ func (s *HTTPHandlers) CatalogRegister(resp http.ResponseWriter, req *http.Reque
 	s.parseToken(req, &args.Token)
 
 	// Forward to the servers
-	var out struct{}
+	var out structs.RegisterReply
 	if err := s.agent.RPC(req.Context(), "Catalog.Register", &args, &out); err != nil {
 		metrics.IncrCounterWithLabels([]string{"client", "rpc", "error", "catalog_register"}, 1,
 			s.nodeMetricsLabels())
+		if strings.Contains(err.Error(), structs.ErrIdempotencyConflict.Error()) {
+			return nil, HTTPError{StatusCode: http.StatusConflict, Reason: err.Error()}
+		}
 		return nil, err
 	}
 	metrics.IncrCounterWithLabels([]string{"client", "api", "success", "catalog_register"}, 1,
 		s.nodeMetricsLabels())
+	// Idempotent registrations return their result body; keyless requests keep
+	// the historical empty success response.
+	if args.IdempotencyKey != "" {
+		return &out, nil
+	}
 	return true, nil
 }
 

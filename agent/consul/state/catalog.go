@@ -136,14 +136,27 @@ func (s *Restore) FreeVirtualIP(req FreeVirtualIP) error {
 // registration is performed within a single transaction to avoid race
 // conditions on state updates.
 func (s *Store) EnsureRegistration(idx uint64, req *structs.RegisterRequest) error {
+	_, err := s.EnsureRegistrationWithResult(idx, req)
+	return err
+}
+
+// EnsureRegistrationWithResult behaves like EnsureRegistration and, for
+// requests carrying an IdempotencyKey, also returns the registration result
+// containing the change summary, sortable entity versions and replay state.
+// The reply is nil for requests without an idempotency key.
+func (s *Store) EnsureRegistrationWithResult(idx uint64, req *structs.RegisterRequest) (*structs.RegisterReply, error) {
 	tx := s.db.WriteTxn(idx)
 	defer tx.Abort()
 
-	if err := s.ensureRegistrationTxn(tx, idx, false, req, false); err != nil {
-		return err
+	reply, err := s.ensureRegistrationTxnWithResult(tx, idx, false, req, false)
+	if err != nil {
+		return nil, err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return reply, nil
 }
 
 func (s *Store) ensureCheckIfNodeMatches(
@@ -181,11 +194,66 @@ func printNodeName(nodeName, partition string) string {
 // registration is performed within a single transaction to avoid race
 // conditions on state updates.
 func (s *Store) ensureRegistrationTxn(tx WriteTxn, idx uint64, preserveIndexes bool, req *structs.RegisterRequest, restore bool) error {
+	_, err := s.ensureRegistrationTxnWithResult(tx, idx, preserveIndexes, req, restore)
+	return err
+}
+
+// ensureRegistrationTxnWithResult is the transactional implementation behind
+// EnsureRegistration/EnsureRegistrationWithResult. For keyed requests it
+// deduplicates replays and rejects conflicting payloads inside the same
+// transaction that performs the registration, records the outcome, and
+// reports the change summary and final entity versions.
+func (s *Store) ensureRegistrationTxnWithResult(tx WriteTxn, idx uint64, preserveIndexes bool, req *structs.RegisterRequest, restore bool) (*structs.RegisterReply, error) {
 	if err := validateRegisterRequestPeerNamesTxn(tx, req, restore); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := validateRegisterRequestTxn(tx, req, restore); err != nil {
-		return err
+		return nil, err
+	}
+
+	keyed := req.IdempotencyKey != ""
+
+	// Idempotency handling: a committed record either turns this apply into a
+	// no-op replay or rejects the request as a conflict. Running this inside
+	// the write transaction serializes concurrent requests sharing a key.
+	if keyed {
+		rec, err := txnRegistrationRecord(tx, &req.EnterpriseMeta, req.PeerName, req.IdempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			if rec.RequestHash != req.NormalizedContentHash() {
+				return nil, structs.ErrIdempotencyConflict
+			}
+			return rec.ToReply(req.IdempotencyKey), nil
+		}
+	}
+
+	summary := structs.ChangeSummary{}
+
+	// Snapshot the checks touched by this request so that the summary can
+	// classify them as created, updated or unchanged after the write.
+	effectiveChecks := req.Checks
+	if req.Check != nil {
+		effectiveChecks = append(effectiveChecks, req.Check)
+	}
+	existingChecks := make(map[string]*structs.HealthCheck, len(effectiveChecks))
+	for _, check := range effectiveChecks {
+		if check.CheckID == "" {
+			continue
+		}
+		existing, err := tx.First(tableChecks, indexID, NodeCheckQuery{
+			EnterpriseMeta: check.EnterpriseMeta,
+			Node:           check.Node,
+			CheckID:        string(check.CheckID),
+			PeerName:       check.PeerName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed check lookup: %s", err)
+		}
+		if existing != nil {
+			existingChecks[string(check.CheckID)] = existing.(*structs.HealthCheck)
+		}
 	}
 
 	// Create a node structure.
@@ -199,6 +267,7 @@ func (s *Store) ensureRegistrationTxn(tx WriteTxn, idx uint64, preserveIndexes b
 		Meta:            req.NodeMeta,
 		PeerName:        req.PeerName,
 		Locality:        req.Locality,
+		Version:         req.NodeVersion,
 	}
 	if preserveIndexes {
 		node.CreateIndex = req.CreateIndex
@@ -217,12 +286,21 @@ func (s *Store) ensureRegistrationTxn(tx WriteTxn, idx uint64, preserveIndexes b
 			PeerName:       node.PeerName,
 		})
 		if err != nil {
-			return fmt.Errorf("node lookup failed: %s", err)
+			return nil, fmt.Errorf("node lookup failed: %s", err)
 		}
-		if existing == nil || req.ChangesNode(existing.(*structs.Node)) {
+		switch {
+		case existing == nil:
+			summary.Node = structs.ChangeCreated
 			if err := s.ensureNodeTxn(tx, idx, preserveIndexes, node); err != nil {
-				return fmt.Errorf("failed inserting node: %s", err)
+				return nil, fmt.Errorf("failed inserting node: %s", err)
 			}
+		case req.ChangesNode(existing.(*structs.Node)):
+			summary.Node = structs.ChangeUpdated
+			if err := s.ensureNodeTxn(tx, idx, preserveIndexes, node); err != nil {
+				return nil, fmt.Errorf("failed inserting node: %s", err)
+			}
+		default:
+			summary.Node = structs.ChangeUnchanged
 		}
 	}
 
@@ -237,12 +315,28 @@ func (s *Store) ensureRegistrationTxn(tx WriteTxn, idx uint64, preserveIndexes b
 			PeerName:       req.PeerName,
 		})
 		if err != nil {
-			return fmt.Errorf("failed service lookup: %s", err)
+			return nil, fmt.Errorf("failed service lookup: %s", err)
 		}
-		if existing == nil || !(existing.(*structs.ServiceNode).ToNodeService()).IsSame(req.Service) {
-			if err := ensureServiceTxn(tx, idx, req.Node, preserveIndexes, req.Service); err != nil {
-				return fmt.Errorf("failed inserting service: %s", err)
 
+		// MergeService performs a partial update: fields omitted from the
+		// request retain their existing values instead of being cleared.
+		service := req.Service
+		if existing != nil && req.MergeService {
+			service = structs.MergeNodeService(existing.(*structs.ServiceNode).ToNodeService(), req.Service)
+		}
+
+		switch {
+		case existing == nil:
+			summary.Service = structs.ChangeCreated
+		case !(existing.(*structs.ServiceNode).ToNodeService()).IsSame(service):
+			summary.Service = structs.ChangeUpdated
+		default:
+			summary.Service = structs.ChangeUnchanged
+		}
+
+		if existing == nil || !(existing.(*structs.ServiceNode).ToNodeService()).IsSame(service) {
+			if err := ensureServiceTxn(tx, idx, req.Node, preserveIndexes, service); err != nil {
+				return nil, fmt.Errorf("failed inserting service: %s", err)
 			}
 		}
 	}
@@ -251,17 +345,84 @@ func (s *Store) ensureRegistrationTxn(tx WriteTxn, idx uint64, preserveIndexes b
 	if req.Check != nil {
 		err := s.ensureCheckIfNodeMatches(tx, idx, preserveIndexes, req.Node, req.PartitionOrDefault(), req.PeerName, req.Check)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	for _, check := range req.Checks {
 		err := s.ensureCheckIfNodeMatches(tx, idx, preserveIndexes, req.Node, req.PartitionOrDefault(), req.PeerName, check)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	if len(effectiveChecks) > 0 {
+		summary.Checks = make([]structs.CheckChange, 0, len(effectiveChecks))
+		for _, check := range effectiveChecks {
+			action := structs.ChangeCreated
+			if before, ok := existingChecks[string(check.CheckID)]; ok {
+				action = structs.ChangeUpdated
+				if before.IsSame(check) {
+					action = structs.ChangeUnchanged
+				}
+			}
+			summary.Checks = append(summary.Checks, structs.CheckChange{
+				CheckID: string(check.CheckID),
+				Action:  action,
+			})
+		}
+	}
+
+	// Read back the final entity versions, which are the sortable versions
+	// returned to watch consumers.
+	var nodeVersion, serviceVersion uint64
+	{
+		finalNode, err := tx.First(tableNodes, indexID, Query{
+			Value:          req.Node,
+			EnterpriseMeta: req.EnterpriseMeta,
+			PeerName:       req.PeerName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("final node lookup failed: %s", err)
+		}
+		if finalNode != nil {
+			nodeVersion = finalNode.(*structs.Node).Version
+		}
+	}
+	if req.Service != nil {
+		finalService, err := tx.First(tableServices, indexID, NodeServiceQuery{
+			EnterpriseMeta: req.Service.EnterpriseMeta,
+			Node:           req.Node,
+			Service:        req.Service.ID,
+			PeerName:       req.PeerName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("final service lookup failed: %s", err)
+		}
+		if finalService != nil {
+			serviceVersion = finalService.(*structs.ServiceNode).ServiceVersion
+		}
+	}
+
+	reply := &structs.RegisterReply{
+		IdempotencyKey: req.IdempotencyKey,
+		NodeVersion:    nodeVersion,
+		ServiceVersion: serviceVersion,
+		Summary:        summary,
+		RaftIndex: structs.RaftIndex{
+			CreateIndex: idx,
+			ModifyIndex: idx,
+		},
+	}
+
+	// Persist the idempotency record in the same transaction so it is either
+	// visible together with the registration or not at all.
+	if keyed {
+		if err := putRegistrationRecordTxn(tx, idx, newRegistrationRecord(idx, req, reply)); err != nil {
+			return nil, err
+		}
+	}
+
+	return reply, nil
 }
 
 func validateRegisterRequestPeerNamesTxn(_ ReadTxn, args *structs.RegisterRequest, _ bool) error {
@@ -468,11 +629,21 @@ func (s *Store) ensureNodeTxn(tx WriteTxn, idx uint64, preserveIndexes bool, nod
 	if n != nil {
 		node.CreateIndex = n.CreateIndex
 		node.ModifyIndex = n.ModifyIndex
+		node.Version = n.Version
 		// We do not need to update anything
 		if node.IsSame(n) {
 			return nil
 		}
-		node.ModifyIndex = idx
+		if preserveIndexes {
+			// Snapshot restores carry their own version; seed it for data
+			// written by older versions that had no per-entity version.
+			if node.Version == 0 {
+				node.Version = structs.NextEntityVersion(n.Version)
+			}
+		} else {
+			node.ModifyIndex = idx
+			node.Version = structs.NextEntityVersion(n.Version)
+		}
 	} else if !preserveIndexes || node.CreateIndex == 0 {
 		// If this isn't a snapshot or there were no saved indexes, set CreateIndex
 		// and ModifyIndex from the given index. Prior to 1.9.0/1.8.3/1.7.7, nodes
@@ -480,6 +651,12 @@ func (s *Store) ensureNodeTxn(tx WriteTxn, idx uint64, preserveIndexes bool, nod
 		// when loading a snapshot from an older version.
 		node.CreateIndex = idx
 		node.ModifyIndex = idx
+		if !preserveIndexes {
+			node.Version = 1
+		}
+	}
+	if node.Version == 0 {
+		node.Version = 1
 	}
 
 	// Insert the node and update the index.
@@ -990,15 +1167,17 @@ func ensureServiceTxn(tx WriteTxn, idx uint64, node string, preserveIndexes bool
 	if n == nil {
 		return ErrMissingNode
 	}
+	var existingServiceNode *structs.ServiceNode
 	if existing != nil {
-		serviceNode := existing.(*structs.ServiceNode)
-		entry.CreateIndex = serviceNode.CreateIndex
-		entry.ModifyIndex = serviceNode.ModifyIndex
+		existingServiceNode = existing.(*structs.ServiceNode)
+		entry.CreateIndex = existingServiceNode.CreateIndex
+		entry.ModifyIndex = existingServiceNode.ModifyIndex
+		entry.ServiceVersion = existingServiceNode.ServiceVersion
 		// We cannot return here because: we want to keep existing behavior (ex: failed node lookup -> ErrMissingNode)
 		// It might be modified in future, but it requires changing many unit tests
 		// Enforcing saving the entry also ensures that if we add default values in .ToServiceNode()
 		// those values will be saved even if node is not really modified for a while.
-		if entry.IsSameService(serviceNode) {
+		if entry.IsSameService(existingServiceNode) {
 			return nil
 		}
 	}
@@ -1006,7 +1185,15 @@ func ensureServiceTxn(tx WriteTxn, idx uint64, node string, preserveIndexes bool
 		entry.ModifyIndex = idx
 		if existing == nil {
 			entry.CreateIndex = idx
+			entry.ServiceVersion = 1
+		} else {
+			entry.ServiceVersion = structs.NextEntityVersion(existingServiceNode.ServiceVersion)
 		}
+	}
+	if entry.ServiceVersion == 0 {
+		// Seed versions for entries restored from snapshots written by older
+		// versions that had no per-entity version.
+		entry.ServiceVersion = 1
 	}
 
 	// Insert the service and update the index

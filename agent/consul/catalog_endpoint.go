@@ -106,7 +106,12 @@ func hasPeerNameInRequest(req *structs.RegisterRequest) bool {
 
 // Register a service and/or check(s) in a node, creating the node if it doesn't exist.
 // It is valid to pass no service or checks to simply create the node itself.
-func (c *Catalog) Register(args *structs.RegisterRequest, reply *struct{}) error {
+//
+// Requests carrying an IdempotencyKey are safe to retry: an identical request
+// returns the original result (change summary, entity versions and indexes)
+// without applying again, while a request reusing the key for a different
+// payload fails with ErrIdempotencyConflict.
+func (c *Catalog) Register(args *structs.RegisterRequest, reply *structs.RegisterReply) error {
 	if !c.srv.config.PeeringTestAllowPeerRegistrations && hasPeerNameInRequest(args) {
 		return fmt.Errorf("cannot register requests with PeerName in them")
 	}
@@ -197,8 +202,32 @@ func (c *Catalog) Register(args *structs.RegisterRequest, reply *struct{}) error
 		return err
 	}
 
-	_, err = c.srv.raftApply(structs.RegisterRequestType, args)
-	return err
+	// Fast path for retried idempotent requests: a committed record is
+	// returned without another raft entry. A record with a different request
+	// hash is a conflict. Concurrent requests that both miss this lookup are
+	// resolved against the same record inside the FSM transaction.
+	if args.IdempotencyKey != "" {
+		rec, err := state.GetRegistrationRecord(&args.EnterpriseMeta, args.PeerName, args.IdempotencyKey)
+		if err != nil {
+			return err
+		}
+		if rec != nil {
+			if rec.RequestHash != args.NormalizedContentHash() {
+				return structs.ErrIdempotencyConflict
+			}
+			*reply = *rec.ToReply(args.IdempotencyKey)
+			return nil
+		}
+	}
+
+	resp, err := c.srv.raftApply(structs.RegisterRequestType, args)
+	if err != nil {
+		return err
+	}
+	if r, ok := resp.(*structs.RegisterReply); ok && r != nil {
+		*reply = *r
+	}
+	return nil
 }
 
 // nodePreApply does the verification of a node before it is applied to Raft.

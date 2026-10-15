@@ -167,9 +167,15 @@ func (c *FSM) applyRegister(buf []byte, index uint64) interface{} {
 	}
 
 	// Apply all updates in a single transaction
-	if err := c.state.EnsureRegistration(index, &req); err != nil {
+	reply, err := c.state.EnsureRegistrationWithResult(index, &req)
+	if err != nil {
 		c.logger.Warn("EnsureRegistration failed", "error", err)
 		return err
+	}
+	// Only keyed, idempotent registrations produce a reply so that
+	// historical callers expecting a nil response keep working.
+	if req.IdempotencyKey != "" {
+		return reply
 	}
 	return nil
 }

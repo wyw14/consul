@@ -46,6 +46,7 @@ func init() {
 	registerRestorer(structs.FreeVirtualIPRequestType, restoreFreeVirtualIP)
 	registerRestorer(structs.PeeringWriteType, restorePeering)
 	registerRestorer(structs.PeeringTrustBundleWriteType, restorePeeringTrustBundle)
+	registerRestorer(structs.RegistrationRecordRequestType, restoreRegistrationRecord)
 	registerRestorer(structs.PeeringSecretsWriteType, restorePeeringSecrets)
 }
 
@@ -96,6 +97,9 @@ func persistCE(s *snapshot, sink raft.SnapshotSink, encoder *codec.Encoder) erro
 		return err
 	}
 	if err := s.persistSystemMetadata(sink, encoder); err != nil {
+		return err
+	}
+	if err := s.persistRegistrationRecords(sink, encoder); err != nil {
 		return err
 	}
 	if err := s.persistIndex(sink, encoder); err != nil {
@@ -538,6 +542,26 @@ func (s *snapshot) persistSystemMetadata(sink raft.SnapshotSink, encoder *codec.
 	return nil
 }
 
+// persistRegistrationRecords writes the committed catalog idempotency
+// records so that retried, keyed registrations keep returning the same result
+// across leader changes and snapshot restores.
+func (s *snapshot) persistRegistrationRecords(sink raft.SnapshotSink, encoder *codec.Encoder) error {
+	records, err := s.state.RegistrationRecords()
+	if err != nil {
+		return err
+	}
+
+	for raw := records.Next(); raw != nil; raw = records.Next() {
+		if _, err := sink.Write([]byte{byte(structs.RegistrationRecordRequestType)}); err != nil {
+			return err
+		}
+		if err := encoder.Encode(raw.(*state.RegistrationRecord)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *snapshot) persistIndex(sink raft.SnapshotSink, encoder *codec.Encoder) error {
 	// Get all the indexes
 	iter, err := s.state.Indexes()
@@ -885,6 +909,14 @@ func restoreSystemMetadata(header *SnapshotHeader, restore *state.Restore, decod
 		return restore.FeatureGates(&gates)
 	}
 	return restore.SystemMetadataEntry(&req)
+}
+
+func restoreRegistrationRecord(header *SnapshotHeader, restore *state.Restore, decoder *codec.Decoder) error {
+	var rec state.RegistrationRecord
+	if err := decoder.Decode(&rec); err != nil {
+		return err
+	}
+	return restore.RegistrationRecord(&rec)
 }
 
 func restoreServiceVirtualIP(header *SnapshotHeader, restore *state.Restore, decoder *codec.Decoder) error {

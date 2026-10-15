@@ -1636,7 +1636,13 @@ func (i *inmemCodec) WriteResponse(resp *rpc.Response, reply interface{}) error 
 	}
 	sourceValue := reflect.Indirect(reflect.Indirect(reflect.ValueOf(reply)))
 	dst := reflect.Indirect(reflect.Indirect(reflect.ValueOf(i.reply)))
-	dst.Set(sourceValue)
+	// A caller that passes an empty struct (or another non-assignable type)
+	// is deliberately discarding the reply, the same way a network codec
+	// decodes an unneeded response body. Skip the assignment in that case
+	// instead of panicking when a method's concrete reply type changes.
+	if sourceValue.IsValid() && dst.IsValid() && sourceValue.Type().AssignableTo(dst.Type()) {
+		dst.Set(sourceValue)
+	}
 	return nil
 }
 

@@ -41,6 +41,7 @@ func newDBSchema() *memdb.DBSchema {
 		peeringSecretUUIDsTableSchema,
 		policiesTableSchema,
 		preparedQueriesTableSchema,
+		registrationRecordsTableSchema,
 		rolesTableSchema,
 		servicesTableSchema,
 		serviceVirtualIPTableSchema,

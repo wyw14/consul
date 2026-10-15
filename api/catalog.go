@@ -80,6 +80,15 @@ type CatalogRegistration struct {
 	SkipNodeUpdate  bool
 	Partition       string    `json:",omitempty"`
 	Locality        *Locality `json:",omitempty"`
+
+	// IdempotencyKey is a client-generated key that makes the registration
+	// safe to retry. Identical requests carrying the same key return the
+	// same result instead of being applied twice.
+	IdempotencyKey string `json:",omitempty"`
+
+	// MergeService requests a partial update of the Service payload: fields
+	// omitted from Service preserve their stored values.
+	MergeService bool `json:",omitempty"`
 }
 
 type CatalogDeregistration struct {

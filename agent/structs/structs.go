@@ -93,6 +93,7 @@ const (
 	UpdateVirtualIPRequestType                  = 43
 	CensusRequestType                           = 44
 	FeatureGateRequestType                      = 45
+	RegistrationRecordRequestType               = 46 // FSM snapshots only.
 )
 
 const (
@@ -164,6 +165,7 @@ var requestTypeStrings = map[MessageType]string{
 	UpdateVirtualIPRequestType:      "UpdateManualVirtualIPRequestType",
 	CensusRequestType:               "Census",
 	FeatureGateRequestType:          "FeatureGate",
+	RegistrationRecordRequestType:   "RegistrationRecord",
 }
 
 const (
@@ -505,7 +507,31 @@ type RegisterRequest struct {
 	// node portion of this update will not apply.
 	SkipNodeUpdate bool
 
+	// IdempotencyKey is a client-generated, opaque key that makes a
+	// registration safe to retry. A request carrying the same key as an
+	// earlier request is deduplicated: the stored result (change summary,
+	// entity versions and raft indexes) is returned again and the
+	// registration is not applied a second time. Reusing a key with a
+	// different request payload fails with ErrIdempotencyConflict. The key
+	// is scoped to the request's partition, namespace and peer, is
+	// replicated via raft (so retries survive leader changes) and should be
+	// unique per logical registration attempt.
+	IdempotencyKey string `json:",omitempty"`
+
+	// MergeService requests a partial update of the Service payload. When a
+	// service with the same ID already exists, fields left at their zero
+	// value in Service retain the existing values instead of clearing them,
+	// and map-valued fields (Meta, TaggedAddresses) are merged key by key.
+	// It has no effect when the service does not exist yet or when Service
+	// is nil.
+	MergeService bool `json:",omitempty"`
+
 	PeerName string
+
+	// NodeVersion carries the node's per-entity version through snapshot
+	// save/restore. It is populated internally and is ignored for client
+	// requests (only the snapshot restore path preserves it).
+	NodeVersion uint64 `bexpr:"-"`
 
 	// EnterpriseMeta is the embedded enterprise metadata
 	acl.EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
@@ -935,6 +961,13 @@ type Node struct {
 	Meta            map[string]string
 	Locality        *Locality `json:",omitempty" bexpr:"-"`
 
+	// Version is a per-node, monotonically increasing counter that is
+	// bumped every time the node is actually modified. Unlike RaftIndex it
+	// advances only for changes to this node (not every raft entry), which
+	// makes it a stable, sortable version for watch consumers. A node that
+	// was never modified after creation has version 1.
+	Version uint64 `bexpr:"-"`
+
 	RaftIndex `bexpr:"-"`
 }
 
@@ -970,6 +1003,7 @@ func (n *Node) ToRegisterRequest() RegisterRequest {
 		RaftIndex:       n.RaftIndex,
 		EnterpriseMeta:  *n.GetEnterpriseMeta(),
 		PeerName:        n.PeerName,
+		NodeVersion:     n.Version,
 	}
 }
 
@@ -1113,6 +1147,11 @@ type ServiceNode struct {
 	// If not empty, PeerName represents the peer that this ServiceNode was imported from.
 	PeerName string `json:",omitempty"`
 
+	// ServiceVersion is the per-service-instance, monotonically increasing
+	// version. It is bumped every time this service instance is actually
+	// modified and is intended as a sortable version for watch consumers.
+	ServiceVersion uint64 `bexpr:"-"`
+
 	acl.EnterpriseMeta `hcl:",squash" mapstructure:",squash" bexpr:"-"`
 
 	RaftIndex `bexpr:"-"`
@@ -1170,6 +1209,7 @@ func (s *ServiceNode) PartialClone() *ServiceNode {
 		ServiceConnect:           s.ServiceConnect,
 		ServiceAI:                s.ServiceAI.Clone(),
 		ServiceLocality:          s.ServiceLocality,
+		ServiceVersion:           s.ServiceVersion,
 		RaftIndex: RaftIndex{
 			CreateIndex: s.CreateIndex,
 			ModifyIndex: s.ModifyIndex,
@@ -1200,6 +1240,7 @@ func (s *ServiceNode) ToNodeService() *NodeService {
 		PeerName:          s.PeerName,
 		EnterpriseMeta:    s.EnterpriseMeta,
 		Locality:          s.ServiceLocality,
+		Version:           s.ServiceVersion,
 		RaftIndex: RaftIndex{
 			CreateIndex: s.CreateIndex,
 			ModifyIndex: s.ModifyIndex,
@@ -1473,8 +1514,15 @@ type NodeService struct {
 
 	acl.EnterpriseMeta `hcl:",squash" mapstructure:",squash" bexpr:"-"`
 
-	// If not empty, PeerName represents the peer that the NodeService was imported from.
+	// If not empty, PeerName represents a peer that the NodeService was imported from.
 	PeerName string
+
+	// Version is a per-service-instance, monotonically increasing counter
+	// bumped every time the instance is actually modified. It is independent
+	// of raft log indexes and gives watch and polling clients a sortable
+	// version for this exact service instance. Newly created services start
+	// at version 1.
+	Version uint64 `bexpr:"-"`
 
 	RaftIndex `bexpr:"-"`
 }
@@ -1954,6 +2002,7 @@ func (s *NodeService) ToServiceNode(node string) *ServiceNode {
 		ServiceLocality:          s.Locality,
 		EnterpriseMeta:           s.EnterpriseMeta,
 		PeerName:                 s.PeerName,
+		ServiceVersion:           s.Version,
 		RaftIndex: RaftIndex{
 			CreateIndex: s.CreateIndex,
 			ModifyIndex: s.ModifyIndex,

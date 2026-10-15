@@ -459,6 +459,7 @@ func TestStateStore_EnsureRegistration(t *testing.T) {
 				Partition:       structs.NodeEnterpriseMetaInDefaultPartition().PartitionOrEmpty(),
 				TaggedAddresses: map[string]string{"hello": "world"},
 				Meta:            map[string]string{"somekey": "somevalue"},
+				Version:         1,
 				RaftIndex:       structs.RaftIndex{CreateIndex: 1, ModifyIndex: 1},
 				PeerName:        peerName,
 				Locality:        &structs.Locality{Region: "us-west-1", Zone: "us-west-1a"},
@@ -482,6 +483,7 @@ func TestStateStore_EnsureRegistration(t *testing.T) {
 					Port:           8080,
 					Tags:           []string{"primary"},
 					Weights:        &structs.Weights{Passing: 1, Warning: 1},
+					Version:        1,
 					RaftIndex:      structs.RaftIndex{CreateIndex: 2, ModifyIndex: 2},
 					EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 					PeerName:       peerName,
@@ -1937,12 +1939,14 @@ func TestStateStore_EnsureService(t *testing.T) {
 	// Results match the inserted services and have the proper indexes set.
 	expect1 := *ns1
 	expect1.CreateIndex, expect1.ModifyIndex = 10, 10
+	expect1.Version = 1
 	if svc := out.Services["service1"]; !reflect.DeepEqual(&expect1, svc) {
 		t.Fatalf("bad: %#v", svc)
 	}
 
 	expect2 := ns2
 	expect2.CreateIndex, expect2.ModifyIndex = 20, 20
+	expect2.Version = 1
 	if svc := out.Services["service2"]; !reflect.DeepEqual(&expect2, svc) {
 		t.Fatalf("bad: %#v %#v", ns2, svc)
 	}
@@ -1972,6 +1976,7 @@ func TestStateStore_EnsureService(t *testing.T) {
 	}
 	expect1.Address = "1.1.1.2"
 	expect1.ModifyIndex = 40
+	expect1.Version = 2
 	if svc := out.Services["service1"]; !reflect.DeepEqual(&expect1, svc) {
 		t.Fatalf("bad: %#v", svc)
 	}
@@ -2010,6 +2015,7 @@ func TestStateStore_EnsureService_connectProxy(t *testing.T) {
 
 	expect1 := *ns1
 	expect1.CreateIndex, expect1.ModifyIndex = 10, 10
+	expect1.Version = 1
 	assert.Equal(t, &expect1, out.Services["connect-proxy"])
 }
 
@@ -2668,7 +2674,7 @@ func TestStateStore_Services(t *testing.T) {
 		ns1.ToServiceNode("node1"),
 		ns2.ToServiceNode("node2"),
 	}
-	assertDeepEqual(t, expected, services, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex"))
+	assertDeepEqual(t, expected, services, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex", "ServiceVersion"))
 
 	// Deleting a node with a service should fire the watch.
 	if err := s.DeleteNode(6, "node1", nil, ""); err != nil {
@@ -2736,7 +2742,7 @@ func TestStateStore_ServicesByNodeMeta(t *testing.T) {
 		expected := []*structs.ServiceNode{
 			ns1.ToServiceNode("node0"),
 		}
-		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex"))
+		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex", "ServiceVersion"))
 	})
 
 	t.Run("Get all services using the common meta value", func(t *testing.T) {
@@ -2749,7 +2755,7 @@ func TestStateStore_ServicesByNodeMeta(t *testing.T) {
 			ns1.ToServiceNode("node0"),
 			ns2.ToServiceNode("node1"),
 		}
-		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex"))
+		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex", "ServiceVersion"))
 	})
 
 	t.Run("Get an empty list for an invalid meta value", func(t *testing.T) {
@@ -2769,7 +2775,7 @@ func TestStateStore_ServicesByNodeMeta(t *testing.T) {
 		expected := []*structs.ServiceNode{
 			ns1.ToServiceNode("node0"),
 		}
-		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex"))
+		assertDeepEqual(t, res, expected, cmpopts.IgnoreFields(structs.ServiceNode{}, "RaftIndex", "ServiceVersion"))
 	})
 
 	t.Run("Registering some unrelated node + service should not fire the watch.", func(t *testing.T) {
@@ -3378,6 +3384,7 @@ func TestStateStore_Service_Snapshot(t *testing.T) {
 		}
 
 		ns[i].CreateIndex, ns[i].ModifyIndex = uint64(i+1), uint64(i+1)
+		ns[i].Version = 1
 		if !reflect.DeepEqual(ns[i], svc.ToNodeService()) {
 			t.Fatalf("bad: %#v != %#v", svc, ns[i])
 		}
@@ -5337,6 +5344,7 @@ func TestStateStore_NodeInfo_NodeDump(t *testing.T) {
 					Meta:    map[string]string{"version": "1.17.0"},
 					Port:    1111,
 					Weights: &structs.Weights{Passing: 1, Warning: 1},
+					Version: 1,
 					RaftIndex: structs.RaftIndex{
 						CreateIndex: 10,
 						ModifyIndex: 10,
@@ -5350,6 +5358,7 @@ func TestStateStore_NodeInfo_NodeDump(t *testing.T) {
 					Meta:    make(map[string]string),
 					Port:    1111,
 					Weights: &structs.Weights{Passing: 1, Warning: 1},
+					Version: 1,
 					RaftIndex: structs.RaftIndex{
 						CreateIndex: 2,
 						ModifyIndex: 2,
@@ -5363,6 +5372,7 @@ func TestStateStore_NodeInfo_NodeDump(t *testing.T) {
 					Meta:    make(map[string]string),
 					Port:    1111,
 					Weights: &structs.Weights{Passing: 1, Warning: 1},
+					Version: 1,
 					RaftIndex: structs.RaftIndex{
 						CreateIndex: 3,
 						ModifyIndex: 3,
@@ -5409,6 +5419,7 @@ func TestStateStore_NodeInfo_NodeDump(t *testing.T) {
 					Port:    1111,
 					Meta:    make(map[string]string),
 					Weights: &structs.Weights{Passing: 1, Warning: 1},
+					Version: 1,
 					RaftIndex: structs.RaftIndex{
 						CreateIndex: 4,
 						ModifyIndex: 4,
@@ -5422,6 +5433,7 @@ func TestStateStore_NodeInfo_NodeDump(t *testing.T) {
 					Port:    1111,
 					Meta:    make(map[string]string),
 					Weights: &structs.Weights{Passing: 1, Warning: 1},
+					Version: 1,
 					RaftIndex: structs.RaftIndex{
 						CreateIndex: 5,
 						ModifyIndex: 5,
@@ -6069,6 +6081,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6081,6 +6094,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6117,6 +6131,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6129,6 +6144,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6178,6 +6194,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6190,6 +6207,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6215,6 +6233,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6227,6 +6246,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6273,6 +6293,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6285,6 +6306,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6322,6 +6344,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6334,6 +6357,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,
@@ -6346,6 +6370,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				Address:   "127.0.0.2",
 				Node:      "baz",
 				Partition: acl.DefaultPartitionName,
+				Version:   1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 12,
 					ModifyIndex: 12,
@@ -6358,6 +6383,7 @@ func TestStateStore_ServiceGateways_Terminating(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				Port:           443,
+				Version:        1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 20,
 					ModifyIndex: 20,

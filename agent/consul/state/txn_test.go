@@ -185,6 +185,7 @@ func TestStateStore_Txn_Node(t *testing.T) {
 	// Make sure the response looks as expected.
 	nodes[1].Datacenter = "dc2"
 	nodes[1].ModifyIndex = 8
+	nodes[1].Version = 2
 	expected := structs.TxnResults{
 		&structs.TxnResult{
 			Node: &nodes[0],
@@ -279,6 +280,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				Address: "1.1.1.1",
 				Port:    1111,
 				Weights: &structs.Weights{Passing: 1, Warning: 1},
+				Version: 1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 2,
 					ModifyIndex: 2,
@@ -291,6 +293,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 			Service: &structs.NodeService{
 				ID:      "svc5",
 				Weights: &structs.Weights{Passing: 1, Warning: 1},
+				Version: 1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 6,
 					ModifyIndex: 6,
@@ -303,6 +306,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				ID:      "svc2",
 				Tags:    []string{"modified"},
 				Weights: &structs.Weights{Passing: 1, Warning: 1},
+				Version: 2,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 3,
 					ModifyIndex: 6,
@@ -325,6 +329,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 		Node: &structs.Node{
 			Node:      "node1",
 			Partition: structs.NodeEnterpriseMetaInDefaultPartition().PartitionOrEmpty(),
+			Version:   1,
 			RaftIndex: structs.RaftIndex{
 				CreateIndex: 1,
 				ModifyIndex: 1,
@@ -336,6 +341,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				Service: "svc1",
 				Address: "1.1.1.1",
 				Port:    1111,
+				Version: 1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 2,
 					ModifyIndex: 2,
@@ -345,7 +351,8 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				Meta:           map[string]string{},
 			},
 			"svc5": {
-				ID: "svc5",
+				ID:      "svc5",
+				Version: 1,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 6,
 					ModifyIndex: 6,
@@ -354,8 +361,9 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				EnterpriseMeta: *structs.DefaultEnterpriseMetaInDefaultPartition(),
 			},
 			"svc2": {
-				ID:   "svc2",
-				Tags: []string{"modified"},
+				ID:      "svc2",
+				Tags:    []string{"modified"},
+				Version: 2,
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 3,
 					ModifyIndex: 6,

@@ -1926,6 +1926,11 @@ var cmpPartialOrderEvents = cmp.Options{
 
 var cmpEvents = cmp.Options{
 	cmp.AllowUnexported(EventPayloadCheckServiceNode{}),
+	// Per-entity versions are asserted by the registration tests; they are
+	// incidental to the event change semantics covered here.
+	cmpopts.IgnoreFields(structs.Node{}, "Version"),
+	cmpopts.IgnoreFields(structs.NodeService{}, "Version"),
+	cmpopts.IgnoreFields(structs.ServiceNode{}, "ServiceVersion"),
 }
 
 type regOption func(req *structs.RegisterRequest) error
