@@ -45,6 +45,46 @@ type certData struct {
 
 	// refreshRateLimiter limits the rate at which the cert can be regenerated
 	refreshRateLimiter *rate.Limiter
+
+	// dryRun is the in-memory checkpoint of the latest dry-run rotation check
+	// for this key. It is guarded by lock and never influences the active cert
+	// (value/index/state) or the real rotation path. It is discarded together
+	// with the certData entry when the TTL heap evicts the key.
+	dryRun *dryRunCheckpoint
+}
+
+// getDryRunCheckpoint returns the current dry-run checkpoint under lock.
+func (c *certData) getDryRunCheckpoint() *dryRunCheckpoint {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	return c.dryRun
+}
+
+// setDryRunCheckpoint replaces the dry-run checkpoint under lock.
+func (c *certData) setDryRunCheckpoint(cp *dryRunCheckpoint) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.dryRun = cp
+}
+
+// commitDryRunCheckpoint installs cp at the end of a run unless it was
+// abandoned by ClearDryRunState while the run was finishing. The abandoned
+// check and the pointer assignment happen in the same critical section that
+// ClearDryRunState uses to nil the pointer, closing the check-then-set race.
+//
+// beforeSet is invoked inside that critical section between the check and the
+// assignment and exists only to drive the interleaving deterministically in
+// tests; production callers pass nil.
+func (c *certData) commitDryRunCheckpoint(cp *dryRunCheckpoint, beforeSet func(*dryRunCheckpoint)) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if cp.abandoned.Load() {
+		return
+	}
+	if beforeSet != nil {
+		beforeSet(cp)
+	}
+	c.dryRun = cp
 }
 
 func (c *certData) MarkRefreshing(v bool) {

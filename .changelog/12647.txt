@@ -1,0 +1,3 @@
+```release-note:improvement
+connect: The leaf certificate manager now exposes an observable dry-run rotation check (`DryRunRotate`) that performs cache-hit inspection, root CA overlap-window validation, a real signing call and candidate certificate chain verification without replacing the active certificate. Failed checks return a stable per-stage reason code and can be resumed from the last completed stage. New `leaf-certs.dry_run.stage` and `leaf-certs.dry_run.run` metrics report each stage outcome.
+```

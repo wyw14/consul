@@ -97,6 +97,14 @@ func (s *TestSigner) GetSignCallErrorCount() uint64 {
 	return s.signCallErrorCount
 }
 
+// SignCallCount returns the total number of signing RPCs received, including
+// ones that returned errors.
+func (s *TestSigner) SignCallCount() int {
+	s.signCallLock.Lock()
+	defer s.signCallLock.Unlock()
+	return len(s.signCallCapture)
+}
+
 func (s *TestSigner) UpdateCA(t *testing.T, ca *structs.CARoot) *structs.CARoot {
 	if ca == nil {
 		ca = connect.TestCA(t, nil)

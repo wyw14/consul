@@ -36,6 +36,12 @@ const (
 	DefaultLeafCertRefreshMaxWait    = 1 * time.Minute // maximum backoff wait time
 
 	DefaultQueryTimeout = 10 * time.Minute
+
+	// DefaultRootRotationOverlapWindow is the explicit minimum period during a
+	// root CA rolling update for which the previous root is expected to remain
+	// present in the trusted roots bundle alongside the newly active root. It is
+	// used by the dry-run rotation check to verify and report on the overlap.
+	DefaultRootRotationOverlapWindow = 24 * time.Hour
 )
 
 type Config struct {
@@ -78,6 +84,17 @@ type Config struct {
 
 	// TestOverrideMetricEmissionInterval overrides the periodic metric re-emission cadence in tests.
 	TestOverrideMetricEmissionInterval time.Duration
+
+	// RootRotationOverlapWindow is the explicit minimum amount of time after a
+	// root CA rolling update during which the previous root is expected to
+	// remain trusted alongside the new active root. Dry-run rotation checks
+	// verify this overlap and report on it. When zero it defaults to
+	// DefaultRootRotationOverlapWindow.
+	RootRotationOverlapWindow time.Duration
+
+	// TestOverrideNow overrides the wall clock used by dry-run rotation checks.
+	// It exists for deterministic tests only; production code leaves it nil.
+	TestOverrideNow func() time.Time
 }
 
 func (c Config) withDefaults() Config {
@@ -95,6 +112,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.LeafCertRefreshMaxWait == 0 {
 		c.LeafCertRefreshMaxWait = DefaultLeafCertRefreshMaxWait
+	}
+	if c.RootRotationOverlapWindow <= 0 {
+		c.RootRotationOverlapWindow = DefaultRootRotationOverlapWindow
 	}
 	return c
 }
@@ -144,6 +164,11 @@ func NewManager(deps Deps) *Manager {
 		//
 		certs:           make(map[string]*certData),
 		certsExpiryHeap: ttlcache.NewExpiryHeap(),
+		now:             time.Now,
+	}
+
+	if deps.Config.TestOverrideNow != nil {
+		m.now = deps.Config.TestOverrideNow
 	}
 
 	m.ctx, m.ctxCancel = context.WithCancel(context.Background())
@@ -197,6 +222,22 @@ type Manager struct {
 	// When the leaf cert itself needs replacement requests will coalesce
 	// together through this chokepoint.
 	certGroup singleflight.Group
+
+	// dryRunGroup coalesces concurrent dry-run rotation checks for the same
+	// key. It is deliberately separate from certGroup so that a dry-run can
+	// never drive, or be driven by, a real certificate replacement.
+	dryRunGroup singleflight.Group
+
+	// now is the wall clock used by the manager. It defaults to time.Now but
+	// may be overridden via Config.TestOverrideNow in tests.
+	now func() time.Time
+
+	// testDryRunBeforeCommit, when set, is invoked by a dry-run from inside
+	// the commit critical section (while cd.lock is held, between the
+	// abandoned check and the pointer assignment). It exists to
+	// deterministically drive the ClearDryRunState/commit interleaving in
+	// tests; production code leaves it nil.
+	testDryRunBeforeCommit func(*dryRunCheckpoint)
 }
 
 func (m *Manager) getCertData(key string) *certData {

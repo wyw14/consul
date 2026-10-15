@@ -227,76 +227,7 @@ func (m *Manager) generateNewLeaf(
 		return nil, newState, errors.New("cluster has no CA bootstrapped yet")
 	}
 
-	// Build the cert uri
-	var id connect.CertURI
-	var dnsNames []string
-	var ipAddresses []net.IP
-
-	switch {
-	case req.Service != "":
-		id = &connect.SpiffeIDService{
-			Host:       roots.TrustDomain,
-			Datacenter: req.Datacenter,
-			Partition:  req.TargetPartition(),
-			Namespace:  req.TargetNamespace(),
-			Service:    req.Service,
-		}
-		dnsNames = append(dnsNames, req.DNSSAN...)
-
-	case req.Agent != "":
-		id = &connect.SpiffeIDAgent{
-			Host:       roots.TrustDomain,
-			Datacenter: req.Datacenter,
-			Partition:  req.TargetPartition(),
-			Agent:      req.Agent,
-		}
-		dnsNames = append([]string{"localhost"}, req.DNSSAN...)
-		ipAddresses = append([]net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}, req.IPSAN...)
-
-	case req.Kind == structs.ServiceKindMeshGateway:
-		id = &connect.SpiffeIDMeshGateway{
-			Host:       roots.TrustDomain,
-			Datacenter: req.Datacenter,
-			Partition:  req.TargetPartition(),
-		}
-		dnsNames = append(dnsNames, req.DNSSAN...)
-
-	case req.Kind != "":
-		return nil, newState, fmt.Errorf("unsupported kind: %s", req.Kind)
-
-	case req.Server:
-		if req.Datacenter == "" {
-			return nil, newState, errors.New("datacenter name must be specified")
-		}
-		id = &connect.SpiffeIDServer{
-			Host:       roots.TrustDomain,
-			Datacenter: req.Datacenter,
-		}
-		dnsNames = append(dnsNames, connect.PeeringServerSAN(req.Datacenter, roots.TrustDomain))
-
-	default:
-		return nil, newState, errors.New("URI must be either service, agent, server, or kind")
-	}
-
-	// Create a new private key
-
-	// TODO: for now we always generate EC keys on clients regardless of the key
-	// type being used by the active CA. This is fine and allowed in TLS1.2 and
-	// signing EC CSRs with an RSA key is supported by all current CA providers so
-	// it's OK. IFF we ever need to support a CA provider that refuses to sign a
-	// CSR with a different signature algorithm, or if we have compatibility
-	// issues with external PKI systems that require EC certs be signed with ECDSA
-	// from the CA (this was required in TLS1.1 but not in 1.2) then we can
-	// instead intelligently pick the key type we generate here based on the key
-	// type of the active signing CA. We already have that loaded since we need
-	// the trust domain.
-	pk, pkPEM, err := connect.GeneratePrivateKey()
-	if err != nil {
-		return nil, newState, err
-	}
-
-	// Create a CSR.
-	csr, err := connect.CreateCSR(id, pk, dnsNames, ipAddresses)
+	pkPEM, csr, err := m.prepareCertificateRequest(req, roots)
 	if err != nil {
 		return nil, newState, err
 	}
@@ -507,4 +438,100 @@ func (m *Manager) generateNewLeaf(
 	)
 
 	return reply, newState, nil
+}
+
+// prepareCertificateRequest builds the SPIFFE identity URI, a fresh private
+// key and the PEM-encoded CSR that would be sent to the CA in order to obtain
+// a new leaf certificate for req under the given trusted root set.
+//
+// It performs no state mutation and does not contact the signer, which allows
+// the exact same request preparation to be shared by the real rotation path
+// and the dry-run rotation check. The returned pkPEM is the private key that
+// corresponds to the CSR and must be paired with the issued certificate.
+func (m *Manager) prepareCertificateRequest(
+	req *ConnectCALeafRequest,
+	roots *structs.IndexedCARoots,
+) (pkPEM string, csrPEM string, err error) {
+	if roots == nil {
+		return "", "", errors.New("no CA roots")
+	}
+	if roots.TrustDomain == "" {
+		return "", "", errors.New("cluster has no CA bootstrapped yet")
+	}
+
+	// Build the cert uri
+	var id connect.CertURI
+	var dnsNames []string
+	var ipAddresses []net.IP
+
+	switch {
+	case req.Service != "":
+		id = &connect.SpiffeIDService{
+			Host:       roots.TrustDomain,
+			Datacenter: req.Datacenter,
+			Partition:  req.TargetPartition(),
+			Namespace:  req.TargetNamespace(),
+			Service:    req.Service,
+		}
+		dnsNames = append(dnsNames, req.DNSSAN...)
+
+	case req.Agent != "":
+		id = &connect.SpiffeIDAgent{
+			Host:       roots.TrustDomain,
+			Datacenter: req.Datacenter,
+			Partition:  req.TargetPartition(),
+			Agent:      req.Agent,
+		}
+		dnsNames = append([]string{"localhost"}, req.DNSSAN...)
+		ipAddresses = append([]net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}, req.IPSAN...)
+
+	case req.Kind == structs.ServiceKindMeshGateway:
+		id = &connect.SpiffeIDMeshGateway{
+			Host:       roots.TrustDomain,
+			Datacenter: req.Datacenter,
+			Partition:  req.TargetPartition(),
+		}
+		dnsNames = append(dnsNames, req.DNSSAN...)
+
+	case req.Kind != "":
+		return "", "", fmt.Errorf("unsupported kind: %s", req.Kind)
+
+	case req.Server:
+		if req.Datacenter == "" {
+			return "", "", errors.New("datacenter name must be specified")
+		}
+		id = &connect.SpiffeIDServer{
+			Host:       roots.TrustDomain,
+			Datacenter: req.Datacenter,
+		}
+		dnsNames = append(dnsNames, connect.PeeringServerSAN(req.Datacenter, roots.TrustDomain))
+
+	default:
+		return "", "", errors.New("URI must be either service, agent, server, or kind")
+	}
+
+	// Create a new private key
+
+	// TODO: for now we always generate EC keys on clients regardless of the key
+	// type being used by the active CA. This is fine and allowed in TLS1.2 and
+	// signing EC CSRs with an RSA key is supported by all current CA providers so
+	// it's OK. IFF we ever need to support a CA provider that refuses to sign a
+	// CSR with a different signature algorithm, or if we have compatibility
+	// issues with external PKI systems that require EC certs be signed with ECDSA
+	// from the CA (this was required in TLS1.1 but not in 1.2) then we can
+	// instead intelligently pick the key type we generate here based on the key
+	// type of the active signing CA. We already have that loaded since we need
+	// the trust domain.
+	pk, pkPEM, err := connect.GeneratePrivateKey()
+	if err != nil {
+		return "", "", err
+	}
+
+	// Create a CSR.
+	csr, err := connect.CreateCSR(id, pk, dnsNames, ipAddresses)
+	if err != nil {
+		return "", "", err
+	}
+
+	return pkPEM, csr, nil
 }
